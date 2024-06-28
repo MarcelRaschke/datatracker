@@ -37,9 +37,7 @@
 import copy
 import datetime
 import itertools
-import io
 import math
-import re
 import json
 import types
 
@@ -81,7 +79,8 @@ from ietf.group.utils import (can_manage_all_groups_of_type,
                               can_manage_materials, group_attribute_change_desc,
                               construct_group_menu_context, get_group_materials,
                               save_group_in_history, can_manage_group, update_role_set,
-                              get_group_or_404, setup_default_community_list_for_group, fill_in_charter_info)                              
+                              get_group_or_404, setup_default_community_list_for_group, fill_in_charter_info,
+                              get_group_email_aliases)                              
 #
 from ietf.ietfauth.utils import has_role, is_authorized_in_group
 from ietf.mailtrigger.utils import gather_relevant_expansions
@@ -137,19 +136,13 @@ def extract_last_name(role):
     return role.person.name_parts()[3]
 
 
-def check_group_email_aliases():
-    pattern = re.compile(r'expand-(.*?)(-\w+)@.*? +(.*)$')
-    tot_count = 0
-    good_count = 0
-    with io.open(settings.GROUP_VIRTUAL_PATH,"r") as virtual_file:
-        for line in virtual_file.readlines():
-            m = pattern.match(line)
-            tot_count += 1
-            if m:
-                good_count += 1
-            if good_count > 50 and tot_count < 3*good_count:
-                return True
-    return False
+def response_from_file(fpath: Path) -> HttpResponse:
+    """Helper to shovel a file back in an HttpResponse"""
+    try:
+        content = fpath.read_bytes()
+    except IOError:
+        raise Http404
+    return HttpResponse(content, content_type="text/plain; charset=utf-8")
 
 
 # --- View functions ---------------------------------------------------
@@ -157,51 +150,25 @@ def check_group_email_aliases():
 def wg_summary_area(request, group_type):
     if group_type != "wg":
         raise Http404
-    areas = Group.objects.filter(type="area", state="active").order_by("name")
-    for area in areas:
-        area.groups = Group.objects.filter(parent=area, type="wg", state="active").order_by("acronym")
-        for group in area.groups:
-            group.chairs = sorted(roles(group, "chair"), key=extract_last_name)
+    return response_from_file(Path(settings.GROUP_SUMMARY_PATH) / "1wg-summary.txt")
 
-    areas = [a for a in areas if a.groups]
-
-    return render(request, 'group/1wg-summary.txt',
-                  { 'areas': areas },
-                  content_type='text/plain; charset=UTF-8')
 
 def wg_summary_acronym(request, group_type):
     if group_type != "wg":
         raise Http404
-    areas = Group.objects.filter(type="area", state="active").order_by("name")
-    groups = Group.objects.filter(type="wg", state="active").order_by("acronym").select_related("parent")
-    for group in groups:
-        group.chairs = sorted(roles(group, "chair"), key=extract_last_name)
-    return render(request, 'group/1wg-summary-by-acronym.txt',
-                  { 'areas': areas,
-                    'groups': groups },
-                  content_type='text/plain; charset=UTF-8')
+    return response_from_file(Path(settings.GROUP_SUMMARY_PATH) / "1wg-summary-by-acronym.txt")
 
 
 def wg_charters(request, group_type):
     if group_type != "wg":
         raise Http404
-    fpath = Path(settings.CHARTER_PATH) / "1wg-charters.txt" 
-    try:
-        content = fpath.read_bytes()
-    except IOError:
-        raise Http404
-    return HttpResponse(content, content_type="text/plain; charset=UTF-8")
+    return response_from_file(Path(settings.CHARTER_PATH) / "1wg-charters.txt") 
 
 
 def wg_charters_by_acronym(request, group_type):
     if group_type != "wg":
         raise Http404
-    fpath = Path(settings.CHARTER_PATH) / "1wg-charters-by-acronym.txt" 
-    try:
-        content = fpath.read_bytes()
-    except IOError:
-        raise Http404
-    return HttpResponse(content, content_type="text/plain; charset=UTF-8")
+    return response_from_file(Path(settings.CHARTER_PATH) / "1wg-charters-by-acronym.txt") 
 
 
 def active_groups(request, group_type=None):
@@ -313,7 +280,7 @@ def active_wgs(request):
             if group.list_subscribe.startswith('http'):
                 group.list_subscribe_url = group.list_subscribe
             elif group.list_email.endswith('@ietf.org'):
-                group.list_subscribe_url = MAILING_LIST_INFO_URL % {'list_addr':group.list_email.split('@')[0]}
+                group.list_subscribe_url = MAILING_LIST_INFO_URL % {'list_addr':group.list_email.split('@')[0].lower(),'domain':'ietf.org'}
             else:
                 group.list_subscribe_url = "mailto:"+group.list_subscribe
 
@@ -596,21 +563,6 @@ def group_about_status_edit(request, acronym, group_type=None):
                     'group':group,
                   }
                  )
-
-def get_group_email_aliases(acronym, group_type):
-    if acronym:
-        pattern = re.compile(r'expand-(%s)(-\w+)@.*? +(.*)$'%acronym)
-    else:
-        pattern = re.compile(r'expand-(.*?)(-\w+)@.*? +(.*)$')
-
-    aliases = []
-    with io.open(settings.GROUP_VIRTUAL_PATH,"r") as virtual_file:
-        for line in virtual_file.readlines():
-            m = pattern.match(line)
-            if m:
-                if acronym or not group_type or Group.objects.filter(acronym=m.group(1),type__slug=group_type):
-                    aliases.append({'acronym':m.group(1),'alias_type':m.group(2),'expansion':m.group(3)})
-    return aliases
 
 def email(request, acronym, group_type=None):
     group = get_group_or_404(acronym, group_type)
